@@ -1,0 +1,9 @@
+pandas
+numpy
+transformers
+langchain
+langchain-community
+gradio
+scikit-learn
+sentence-transformers
+chromadb
