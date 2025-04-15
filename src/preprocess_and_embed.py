@@ -3,17 +3,19 @@
 import pandas as pd
 import numpy as np
 from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain.text_splitter import CharacterTextSplitter
-from langchain.document_loaders import DataFrameLoader
-from langchain.vectorstores import Chroma
+from langchain.text_splitter import RecursiveCharacterTextSplitter  # Changed
+from langchain_community.document_loaders import DataFrameLoader
+from langchain_community.vectorstores import Chroma
 import os
 import warnings
 warnings.filterwarnings('ignore')
 
 DATA_PATH = "../data/books.csv"
 CLEANED_DATA_PATH = "../data/df_cleaned.csv"
-EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
+EMBEDDING_MODEL_NAME = "all-mpnet-base-v2"  # Changed to all-mpnet-base-v2
 PERSIST_DIRECTORY = "chroma_db"
+CHUNK_SIZE = 500  # Reduced chunk size
+CHUNK_OVERLAP = 50
 
 def clean_data(df):
     # Create 'missing_description' and 'book_age' columns
@@ -30,21 +32,26 @@ def clean_data(df):
     df['words_in_description'] = df['description'].str.split().str.len()
     df = df[df['words_in_description'] >= 25]
 
-    # Create 'title and subtitle' and 'tagged_desc'
+    # Create 'title and subtitle'
     df['title and subtitle'] = np.where(
         df['subtitle'].isna(),
         df['title'],
         df[['title', 'subtitle']].astype(str).agg(": ".join, axis=1))
-    df['tagged_desc'] = df[["isbn13", "description"]].astype(str).agg(" ".join, axis=1)
+
+    # Create combined text field
+    df['combined_text'] = df['title'] + " " + df['authors'] + " " + df['description'] #added authors
+
+    # Create 'tagged_desc'
+    df['tagged_desc'] = df[["isbn13", "combined_text"]].astype(str).agg(" ".join, axis=1) #changed to combined_text
 
     # Drop the intermediate columns
-    return df.drop(['subtitle', 'missing_description', 'book_age', 'words_in_description'], axis=1)
+    return df.drop(['subtitle', 'missing_description', 'book_age', 'words_in_description', 'combined_text'], axis=1) #removed combined_text
 
 def create_embeddings_and_store(df, persist_directory):
     embedding = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL_NAME)
     loader = DataFrameLoader(df, page_content_column="tagged_desc")
     documents = loader.load()
-    text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=100, separator="\n") # Adjust chunking if needed
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP, separators=["\n\n", "\n", " ", ""]) # Changed
     texts = text_splitter.split_documents(documents)
     db = Chroma.from_documents(texts, embedding, persist_directory=persist_directory)
     db.persist()

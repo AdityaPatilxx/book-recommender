@@ -3,16 +3,19 @@
 import pandas as pd
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
-from transformers import pipeline
+from transformers import pipeline, AutoModelForSequenceClassification, AutoTokenizer  # Added
 import gradio as gr
 import os
+import torch
 import warnings
 warnings.filterwarnings('ignore')
 
 DATA_PATH = "../data/df_cleaned.csv"
-EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
+EMBEDDING_MODEL_NAME = "all-mpnet-base-v2"  # Changed
 PERSIST_DIRECTORY = "chroma_db"
 CLASSIFICATION_MODEL_NAME = "facebook/bart-large-mnli"
+RERANKING_MODEL_NAME = "cross-encoder/ms-marco-bert-base-reranker" # Added
+
 
 def load_data():
     try:
@@ -31,20 +34,6 @@ def load_vector_store(embedding, persist_directory):
     except Exception as e:
         print(f"Error loading ChromaDB from {persist_directory}: {e}")
         return None
-
-def get_semantic_recommendations(query, df, db, top_k=10):
-    if db is None or df is None:
-        return pd.DataFrame(columns=['title', 'authors', 'categories'])
-    docs = db.similarity_search(query, k=50)
-    books_list = []
-    for doc in docs:
-        try:
-            isbn_candidate = int(doc.page_content.strip('"').split()[0])
-            books_list.append(isbn_candidate)
-        except ValueError:
-            continue
-    recommendations_df = df[df["isbn13"].isin(books_list)][['title', 'authors', 'categories']].head(top_k)
-    return recommendations_df
 
 def load_classifier(model_name):
     try:
@@ -66,14 +55,62 @@ def classify_genre(description, classifier, candidate_labels=None):
         print(f"Error during classification: {e}")
         return None
 
-def get_semantic_recommendations_with_genre_filter(query, genre, df, db, classifier, top_k=10):
+def load_reranker(model_name):  # Added function to load reranking model
+    try:
+        model = AutoModelForSequenceClassification.from_pretrained(model_name)
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model.to(device)
+        return model, tokenizer, device
+    except Exception as e:
+        print(f"Error loading reranking model {model_name}: {e}")
+        return None, None, None
+
+def rerank_results(query, results, model, tokenizer, device): # Added
+    if model is None or tokenizer is None:
+        return results
+    try:
+        inputs = tokenizer(
+            [query] * len(results),
+            results,
+            padding=True,
+            truncation=True,
+            return_tensors="pt",
+        ).to(device)
+        with torch.no_grad():
+            scores = torch.sigmoid(model(**inputs).logits)[:, 0].cpu().tolist()
+        reranked_results = [(result, score) for result, score in zip(results, scores)]
+        reranked_results.sort(key=lambda x: x[1], reverse=True)
+        return [result for result, _ in reranked_results]
+    except Exception as e:
+        print(f"Error during reranking: {e}")
+        return results
+def get_semantic_recommendations(query, df, db, reranker_model, reranker_tokenizer, reranker_device, top_k=10): #added reranker
+    if db is None or df is None:
+        return pd.DataFrame(columns=['title', 'authors', 'categories'])
+    docs = db.similarity_search(query, k=50)  # Increased k
+    results = [doc.page_content for doc in docs]
+    reranked_results = rerank_results(query, results, reranker_model, reranker_tokenizer, reranker_device) #added
+    books_list = []
+    for doc in reranked_results: #changed
+        try:
+            isbn_candidate = int(doc.strip('"').split()[0])
+            books_list.append(isbn_candidate)
+        except ValueError:
+            continue
+    recommendations_df = df[df["isbn13"].isin(books_list)][['title', 'authors', 'categories']].head(top_k)
+    return recommendations_df
+
+def get_semantic_recommendations_with_genre_filter(query, genre, df, db, classifier, reranker_model, reranker_tokenizer, reranker_device, top_k=10): #added reranker
     if db is None or df is None or classifier is None:
         return pd.DataFrame(columns=['title', 'authors', 'predicted_genre'])
-    docs = db.similarity_search(query, k=100)
+    docs = db.similarity_search(query, k=100)  # Increased k
+    results = [doc.page_content for doc in docs]
+    reranked_results = rerank_results(query, results, reranker_model, reranker_tokenizer, reranker_device) #added
     books_list = []
-    for doc in docs:
+    for doc in reranked_results: #changed
         try:
-            isbn_candidate = int(doc.page_content.strip('"').split()[0])
+            isbn_candidate = int(doc.strip('"').split()[0])
             books_list.append(isbn_candidate)
         except ValueError:
             continue
@@ -87,14 +124,15 @@ def recommend_interface(query, use_genre_filter=False, genre_choice="fiction"):
     embedding = load_embeddings()
     db = load_vector_store(embedding, PERSIST_DIRECTORY)
     classifier = load_classifier(CLASSIFICATION_MODEL_NAME)
+    reranker_model, reranker_tokenizer, reranker_device = load_reranker(RERANKING_MODEL_NAME) #added
 
     if df is None or db is None:
         return pd.DataFrame(columns=['title', 'authors', 'categories'] if classifier is None else ['title', 'authors', 'predicted_genre'])
 
     if use_genre_filter and classifier:
-        return get_semantic_recommendations_with_genre_filter(query, genre_choice, df, db, classifier)
+        return get_semantic_recommendations_with_genre_filter(query, genre_choice, df, db, classifier, reranker_model, reranker_tokenizer, reranker_device) #added reranker
     else:
-        return get_semantic_recommendations(query, df, db)
+        return get_semantic_recommendations(query, df, db, reranker_model, reranker_tokenizer, reranker_device) #added reranker
 
 def main():
     classifier_loaded = load_classifier(CLASSIFICATION_MODEL_NAME)

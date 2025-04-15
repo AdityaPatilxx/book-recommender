@@ -1,2 +1,0 @@
-Enter a book title or description,Filter by Genre?,Select Genre,output,timestamp
-wizard school adventure,false,fiction,"{""headers"": [""title"", ""authors"", ""predicted_genre""], ""data"": [], ""metadata"": null}",2025-04-15 18:08:35.728676
